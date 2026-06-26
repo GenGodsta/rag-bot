@@ -3,8 +3,8 @@ import websocket
 import json
 import requests
 
-API_BASE = "https://dangling-unsettled-book.ngrok-free.app"
-WS_URL = "wss://dangling-unsettled-book.ngrok-free.app/api/chat/ws/chat"
+API_BASE = "https://dangling-unsettled-book.ngrok-free.dev"
+WS_URL = "wss://dangling-unsettled-book.ngrok-free.dev/api/chat/ws/chat"
 
 st.set_page_config(page_title="RAG Chatbot", layout="centered", page_icon="📚")
 

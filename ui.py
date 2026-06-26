@@ -3,8 +3,8 @@ import websocket
 import json
 import requests
 
-API_BASE = "https://dangling-unsettled-book.ngrok-free.dev"
-WS_URL = "wss://dangling-unsettled-book.ngrok-free.dev/api/chat/ws/chat"
+API_BASE = "https://streams-addresses-beauty-lecture.trycloudflare.com"
+WS_URL = "wss://streams-addresses-beauty-lecture.trycloudflare.com/api/chat/ws/chat"
 
 st.set_page_config(page_title="RAG Chatbot", layout="centered", page_icon="📚")
 
@@ -99,8 +99,7 @@ for key, val in {
 def do_register(username, password):
     try:
         r = requests.post(f"{API_BASE}/auth/register",
-                          json={"username": username, "password": password},
-                          headers = {"ngrok-skip-browser-warning": "true"})
+                          json={"username": username, "password": password})
         return r.status_code == 201, r.json()
     except Exception as e:
         return False, {"detail": str(e)}
@@ -109,8 +108,7 @@ def do_register(username, password):
 def do_login(username, password):
     try:
         r = requests.post(f"{API_BASE}/auth/login",
-                          data={"username": username, "password": password},
-                          headers = {"ngrok-skip-browser-warning": "true"})
+                          data={"username": username, "password": password})
         if r.status_code == 200:
             data = r.json()
             return True, data["access_token"]
@@ -122,7 +120,7 @@ def do_login(username, password):
 def do_fetch_history(token):
     try:
         r = requests.get(f"{API_BASE}/history/",
-                         headers={"Authorization": f"Bearer {token}","ngrok-skip-browser-warning": "true"})
+                         headers={"Authorization": f"Bearer {token}"})
         if r.status_code == 200:
             return r.json().get("history", [])
     except:
@@ -133,7 +131,7 @@ def do_fetch_history(token):
 def do_clear_history(token):
     try:
         requests.delete(f"{API_BASE}/history/",
-                        headers={"Authorization": f"Bearer {token}","ngrok-skip-browser-warning": "true"})
+                        headers={"Authorization": f"Bearer {token}"})
     except:
         pass
 

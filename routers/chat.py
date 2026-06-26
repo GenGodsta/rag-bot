@@ -3,6 +3,8 @@ from model import chatrequest, chatresponse
 from mongo import connect_db
 from milvus_crossencoding import retrieve
 from ollama import AsyncClient
+from authorization import decode_token
+from history import save_chat, get_history_collection
 import json
 import asyncio
 from ddgs import DDGS
@@ -95,7 +97,14 @@ def duck_search(query: str) -> list:
 
 
 @router.websocket("/ws/chat")
-async def websocket_chat(websocket: WebSocket, dbcollection=Depends(connect_db)):
+async def websocket_chat(
+    websocket: WebSocket,
+    token: str,                          
+    dbcollection=Depends(connect_db),
+    history_col=Depends(get_history_collection)
+):
+    user_id = decode_token(token)       
+
     await websocket.accept()
     try:
         while True:
@@ -114,7 +123,7 @@ async def websocket_chat(websocket: WebSocket, dbcollection=Depends(connect_db))
             from_web = False
 
             if top_score < 3.0:
-                print(f"Low relevance ({top_score:.2f}) — invoking web_search via MCP tool")
+                print(f"[user:{user_id}] Low relevance ({top_score:.2f}) — invoking web_search")
                 response = await AsyncClient().chat(
                     model="llama3.1:8b",
                     messages=[{"role": "user", "content": query}],
@@ -134,16 +143,20 @@ async def websocket_chat(websocket: WebSocket, dbcollection=Depends(connect_db))
             prompt = build_web_prompt(query, context) if from_web else build_prompt(query, context)
             sources = build_sources(chunks)
 
+            full_answer = ""
             async for chunk in await AsyncClient().chat(
                 model="llama3.1:8b",
                 messages=[{"role": "user", "content": prompt}],
                 stream=True
             ):
-                token = chunk.message.content
-                if token:
-                    await websocket.send_text(token)
+                token_text = chunk.message.content
+                if token_text:
+                    full_answer += token_text
+                    await websocket.send_text(token_text)
 
             await websocket.send_text("__DONE__:" + json.dumps({"done": True, "sources": sources}))
+
+            await save_chat(user_id, query, full_answer, sources, history_col)
 
     except WebSocketDisconnect:
         pass

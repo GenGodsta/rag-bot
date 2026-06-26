@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+env/
+
+# Models / cache
+*.bin
+*.safetensors
+.cache/
+
+# Milvus local data
+volumes/
+
+# Misc
+*.log
+.DS_Store

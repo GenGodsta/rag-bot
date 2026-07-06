@@ -1,5 +1,5 @@
 from fastapi import WebSocket, WebSocketDisconnect, APIRouter, Depends
-from app import mcp_client
+from mcp_instance import mcp_client
 from mongo import connect_db
 from milvus_crossencoding import retrieve
 from ollama import AsyncClient

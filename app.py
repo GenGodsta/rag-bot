@@ -6,9 +6,7 @@ from mongo import lifespan as mongo_lifespan
 from routers import chat
 from authorization import router as auth_router
 from history import router as history_router
-from mcp_client import MCPClient
-
-mcp_client = MCPClient("mcp_server.py")
+from mcp_instance import mcp_client
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

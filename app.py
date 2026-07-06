@@ -1,9 +1,21 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from mongo import lifespan
+from contextlib import asynccontextmanager
+
+from mongo import lifespan as mongo_lifespan
 from routers import chat
 from authorization import router as auth_router
 from history import router as history_router
+from mcp_client import MCPClient
+
+mcp_client = MCPClient("mcp_server.py")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with mongo_lifespan(app):
+        await mcp_client.connect()
+        yield
+        await mcp_client.close()
 
 app = FastAPI(lifespan=lifespan)
 

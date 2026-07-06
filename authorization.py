@@ -46,7 +46,7 @@ def decode_token(token: str) -> str:
         user_id = payload.get("sub")
         if not user_id:
             raise HTTPException(status_code=401, detail="Invalid token")
-        return user_id
+        return user_id  
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
@@ -60,7 +60,6 @@ async def get_users_collection() -> AsyncIOMotorCollection:
     return app.state.mongo["ragdb"]["users"]
 
 
-# ---------- Endpoints ----------
 
 @router.post("/register", status_code=201)
 async def register(body: RegisterRequest, users=Depends(get_users_collection)):

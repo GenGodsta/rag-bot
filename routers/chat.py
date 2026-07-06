@@ -1,5 +1,5 @@
 from fastapi import WebSocket, WebSocketDisconnect, APIRouter, Depends
-from model import chatrequest, chatresponse
+from app import mcp_client
 from mongo import connect_db
 from milvus_crossencoding import retrieve
 from ollama import AsyncClient
@@ -7,7 +7,6 @@ from authorization import decode_token
 from history import save_chat, get_history_collection
 import json
 import asyncio
-from ddgs import DDGS
 
 router = APIRouter()
 
@@ -15,8 +14,8 @@ tools = [
     {
         "type": "function",
         "function": {
-            "name": "web_search",
-            "description": "Search the web for information not found in the ML textbooks. Use this when the question is about current events, people, or topics unrelated to machine learning.",
+            "name": "web_research",
+            "description": "Search the web (Google + Wikipedia) for information not found in the ML textbooks. Use this when the question is about current events, people, or topics unrelated to machine learning.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -31,6 +30,25 @@ tools = [
     }
 ]
 
+async def mcp_web_search(query: str) -> list:
+    try:
+        raw_result = await mcp_client.call_tool("web_research", {"query": query})
+        if not raw_result:
+            return []
+        parsed = json.loads(raw_result[0].text)
+        return [
+            {
+                "text": item.get("snippet", ""),
+                "source": item.get("url", ""),
+                "page": "Web",
+                "score": 0.0,
+                "from_web": True
+            }
+            for item in parsed
+        ]
+    except Exception as e:
+        print(f"MCP web search failed: {e}")
+        return []
 
 def build_prompt(query: str, context: str) -> str:
     return f"""You are a helpful AI assistant answering questions from AI/ML books.
@@ -81,20 +99,6 @@ def build_sources(chunks: list) -> list:
     ]
 
 
-def duck_search(query: str) -> list:
-    with DDGS() as ddgs:
-        results = list(ddgs.text(query, max_results=5))
-    return [
-        {
-            "text": r.get("body", ""),
-            "source": r.get("href", ""),
-            "page": "Web",
-            "score": 0.0,
-            "from_web": True
-        }
-        for r in results
-    ]
-
 
 @router.websocket("/ws/chat")
 async def websocket_chat(
@@ -127,16 +131,16 @@ async def websocket_chat(
                 response = await AsyncClient().chat(
                     model="llama3.1:8b",
                     messages=[{"role": "user", "content": query}],
-                    tools=tools
+                    tools=tools,
+                    options={"num_ctx": 4096}
                 )
-
                 if response.message.tool_calls:
                     tool_call = response.message.tool_calls[0]
                     search_query = tool_call.function.arguments["query"]
-                    chunks = await asyncio.to_thread(duck_search, search_query)
+                    chunks = await mcp_web_search(search_query)
                     from_web = True
                 else:
-                    chunks = await asyncio.to_thread(duck_search, query)
+                    chunks = await mcp_web_search(query)
                     from_web = True
 
             context = build_context(chunks)
@@ -147,7 +151,8 @@ async def websocket_chat(
             async for chunk in await AsyncClient().chat(
                 model="llama3.1:8b",
                 messages=[{"role": "user", "content": prompt}],
-                stream=True
+                stream=True,
+                options={"num_ctx": 4096}
             ):
                 token_text = chunk.message.content
                 if token_text:

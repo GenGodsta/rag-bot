@@ -3,8 +3,8 @@ import websocket
 import json
 import requests
 
-API_BASE = "https://streams-addresses-beauty-lecture.trycloudflare.com"
-WS_URL = "wss://streams-addresses-beauty-lecture.trycloudflare.com/api/chat/ws/chat"
+API_BASE = "http://localhost:8000"
+WS_URL = "ws://localhost:8000/api/chat/ws/chat"
 
 st.set_page_config(page_title="RAG Chatbot", layout="centered", page_icon="📚")
 

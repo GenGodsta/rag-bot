@@ -16,6 +16,8 @@ class MCPClient:
 
     async def call_tool(self, tool_name: str, args: dict):
         result = await self.session.call_tool(tool_name, args)
+        if result.isError:
+            raise RuntimeError(f"Tool {tool_name} failed: {result.content[0].text}")
         return result.content
 
     async def list_tools(self):

@@ -7,6 +7,7 @@ from authorization import decode_token
 from history import save_chat, get_history_collection
 import json
 import asyncio
+from milvus_crossencoding import retrieve, rerank_chunks
 
 router = APIRouter()
 
@@ -30,12 +31,14 @@ tools = [
     }
 ]
 
-async def mcp_web_search(query: str) -> list:
+async def mcp_web_search(query: str, topk: int = 15) -> list:
     try:
-        raw_result = await mcp_client.call_tool("web_research", {"query": query})
+        raw_result = await mcp_client.call_tool("web_research", {"query": query, "num_results": topk})
         if not raw_result:
             return []
         parsed = json.loads(raw_result[0].text)
+        if isinstance(parsed, dict):
+            parsed = [parsed]
         return [
             {
                 "text": item.get("snippet", ""),
@@ -137,12 +140,14 @@ async def websocket_chat(
                 if response.message.tool_calls:
                     tool_call = response.message.tool_calls[0]
                     search_query = tool_call.function.arguments["query"]
-                    chunks = await mcp_web_search(search_query)
-                    from_web = True
+                    chunks = await mcp_web_search(search_query, topk=15)
                 else:
-                    chunks = await mcp_web_search(query)
-                    from_web = True
+                    chunks = await mcp_web_search(query, topk=15)
 
+                chunks = rerank_chunks(query, chunks, top_k=5)
+                if chunks:
+                    print(f"[Web Search] Top score: {chunks[0]['score']:.2f}")
+                from_web = True
             context = build_context(chunks)
             prompt = build_web_prompt(query, context) if from_web else build_prompt(query, context)
             sources = build_sources(chunks)

@@ -82,3 +82,14 @@ async def retrieve(query: str, top_k: int, dbcollection: AsyncIOMotorCollection)
     print(f"Dense: {len(dense_chunks)} | BM25: {len(bm25_chunks)} | Merged: {len(merged)} | Top score: {ranked[0]['score']:.2f}")
 
     return ranked[:top_k]
+
+def rerank_chunks(query: str, chunks: list, top_k: int = 5) -> list:
+    if not chunks:
+        return []
+    clean_query = query.encode('utf-8', 'ignore').decode('utf-8')
+    pairs = [(clean_query, c["text"]) for c in chunks]
+    scores = reranker.predict(pairs)
+    for i, score in enumerate(scores):
+        chunks[i]["score"] = float(score)
+    ranked = sorted(chunks, key=lambda x: x["score"], reverse=True)
+    return ranked[:top_k]

@@ -4,7 +4,7 @@ from mongo import connect_db
 from milvus_crossencoding import retrieve
 from ollama import AsyncClient
 from authorization import decode_token
-from history import save_chat, get_history_collection
+from history import save_chat, get_history_collection, get_memory_collection, get_context_for_query, update_memory
 import json
 import asyncio
 from milvus_crossencoding import retrieve, rerank_chunks
@@ -53,13 +53,28 @@ async def mcp_web_search(query: str, topk: int = 15) -> list:
         print(f"MCP web search failed: {e}")
         return []
 
-def build_prompt(query: str, context: str) -> str:
+
+def build_conversation_context(memory: dict) -> str:
+    parts = []
+    if memory.get("summary"):
+        parts.append(f"CONVERSATION SUMMARY (earlier context):\n{memory['summary']}")
+    recent = memory.get("recent_turns", [])
+    if recent:
+        turns_text = "\n".join(
+            f"User: {t['query']}\nAssistant: {t['answer']}" for t in recent
+        )
+        parts.append(f"RECENT CONVERSATION:\n{turns_text}")
+    return "\n\n".join(parts) if parts else ""
+
+
+def build_prompt(query: str, context: str, conversation_context: str = "") -> str:
+    conv_block = f"\n{conversation_context}\n" if conversation_context else ""
     return f"""You are a helpful AI assistant answering questions from AI/ML books.
 You have been given relevant excerpts from the books. Use them to answer the question thoroughly.
 Only say "I don't have enough information" if the excerpts are completely unrelated to the question.
 If the excerpts contain partial information, use it to give the best answer you can.
 Always mention which book and page your answer comes from.
-
+{conv_block}
 CONTEXT:
 {context}
 
@@ -68,10 +83,11 @@ QUESTION: {query}
 ANSWER:"""
 
 
-def build_web_prompt(query: str, context: str) -> str:
+def build_web_prompt(query: str, context: str, conversation_context: str = "") -> str:
+    conv_block = f"\n{conversation_context}\n" if conversation_context else ""
     return f"""You are a helpful AI assistant. Answer the question using only the web search results provided below.
 Do not use your own knowledge. If the results don't contain enough information, say so.
-
+{conv_block}
 WEB SEARCH RESULTS:
 {context}
 
@@ -102,15 +118,15 @@ def build_sources(chunks: list) -> list:
     ]
 
 
-
 @router.websocket("/ws/chat")
 async def websocket_chat(
     websocket: WebSocket,
-    token: str,                          
+    token: str,
     dbcollection=Depends(connect_db),
-    history_col=Depends(get_history_collection)
+    history_col=Depends(get_history_collection),
+    memory_col=Depends(get_memory_collection)
 ):
-    user_id = decode_token(token)       
+    user_id = decode_token(token)
 
     await websocket.accept()
     try:
@@ -118,6 +134,9 @@ async def websocket_chat(
             data = await websocket.receive_json()
             query = data["query"]
             topk = data.get("topk", 5)
+
+            memory = await get_context_for_query(user_id, memory_col)
+            conversation_context = build_conversation_context(memory)
 
             chunks = await retrieve(query, topk, dbcollection)
 
@@ -148,8 +167,13 @@ async def websocket_chat(
                 if chunks:
                     print(f"[Web Search] Top score: {chunks[0]['score']:.2f}")
                 from_web = True
+
             context = build_context(chunks)
-            prompt = build_web_prompt(query, context) if from_web else build_prompt(query, context)
+            prompt = (
+                build_web_prompt(query, context, conversation_context)
+                if from_web
+                else build_prompt(query, context, conversation_context)
+            )
             sources = build_sources(chunks)
 
             full_answer = ""
@@ -167,6 +191,7 @@ async def websocket_chat(
             await websocket.send_text("__DONE__:" + json.dumps({"done": True, "sources": sources}))
 
             await save_chat(user_id, query, full_answer, sources, history_col)
+            asyncio.create_task(update_memory(user_id, query, full_answer, memory_col))
 
     except WebSocketDisconnect:
         pass

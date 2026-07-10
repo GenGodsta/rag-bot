@@ -16,6 +16,7 @@ async def lifespan(app: FastAPI):
     await db["users"].create_index("user_id", unique=True)
     await db["chat_history"].create_index("user_id")
     await db["chat_memory"].create_index("user_id", unique=True)
+    await db["user_facts"].create_index([("namespace", 1), ("key", 1)], unique=True)
 
     yield
     app.state.mongo.close()

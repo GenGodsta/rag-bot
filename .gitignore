@@ -16,4 +16,5 @@ volumes/
 
 # Misc
 *.log
-.DS_Store
+.DS_Storedebug_path_check.txt
+mcp_debug.log

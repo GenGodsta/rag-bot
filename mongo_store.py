@@ -13,12 +13,14 @@ class MongoStore(BaseStore):
         return ".".join(namespace)
 
     async def aput(self, namespace: tuple, key: str, value: dict) -> None:
+        searchable = value.get("content") or json.dumps(value)  # adjust to your actual fact schema
         await self.collection.update_one(
             {"namespace": self._ns_key(namespace), "key": key},
             {"$set": {
                 "namespace": self._ns_key(namespace),
                 "key": key,
                 "value": value,
+                "search_text": searchable,
                 "updated_at": datetime.utcnow()
             }},
             upsert=True
@@ -34,11 +36,14 @@ class MongoStore(BaseStore):
         )
 
     async def asearch(self, namespace: tuple, query: str = None, limit: int = 20) -> list[SearchItem]:
-        cursor = self.collection.find({"namespace": self._ns_key(namespace)}).limit(limit)
+        filter_ = {"namespace": self._ns_key(namespace)}
+        if query:
+            filter_["$text"] = {"$search": query}
+        cursor = self.collection.find(filter_).limit(limit)
         docs = await cursor.to_list(length=limit)
         return [
             SearchItem(namespace=namespace, key=d["key"], value=d["value"],
-                       created_at=d.get("updated_at"), updated_at=d.get("updated_at"), score=None)
+                    created_at=d.get("updated_at"), updated_at=d.get("updated_at"), score=None)
             for d in docs
         ]
 

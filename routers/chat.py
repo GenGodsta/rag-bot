@@ -40,6 +40,42 @@ tools = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Change 1: gating / classification
+# ---------------------------------------------------------------------------
+async def classify_query(query: str) -> bool:
+    """
+    Cheap, fast pre-check: is this question plausibly answerable from the
+    ML/AI textbook corpus, or is it clearly something else (current events,
+    people, general trivia, unrelated domains)?
+
+    Returns True  -> try the book corpus (Milvus retrieval)
+            False -> skip retrieval entirely, go straight to web search
+    """
+    prompt = f"""Classify this question as BOOK or WEB.
+
+BOOK = the question is about AI/ML concepts, algorithms, theory, models, statistics,
+or anything that would plausibly be covered in machine learning textbooks.
+WEB = the question is about current events, specific people, news, dates, or any
+topic clearly outside ML/AI textbook content.
+
+Respond with exactly one word: BOOK or WEB. No explanation.
+
+QUESTION: {query}"""
+
+    try:
+        response = await AsyncClient().chat(
+            model="llama3.1:8b",
+            messages=[{"role": "user", "content": prompt}],
+            options={"num_ctx": 256}
+        )
+        answer = response.message.content.strip().upper()
+        return "WEB" not in answer
+    except Exception as e:
+        print(f"[classify_query] failed, defaulting to BOOK: {e}")
+        return True
+
+
 async def mcp_web_search(query: str, topk: int = 15) -> list:
     print(f"[mcp_web_search] Sending to Serper/Wikipedia via MCP: {query!r} (topk={topk})")
     try:
@@ -61,8 +97,8 @@ async def mcp_web_search(query: str, topk: int = 15) -> list:
         return []
 
 
-async def recall_long_term_facts(user_id: str, store: MongoStore) -> str:
-    items = await store.asearch(("user_facts", user_id))
+async def recall_long_term_facts(user_id: str, query: str, store: MongoStore) -> str:
+    items = await store.asearch(("user_facts", user_id), query=query)
     if not items:
         return ""
     facts = "\n".join(f"- {item.value['fact']}" for item in items)
@@ -91,13 +127,10 @@ Assistant: {answer}"""
         raw = response.message.content.strip()
         print(f"[fact_extraction] raw response: {raw!r}")
 
-        # pull out just the [...] array, ignoring any preamble/commentary
         match = re.search(r"\[.*\]", raw, re.DOTALL)
         if not match:
             raise ValueError("No JSON array found in response")
         facts = json.loads(match.group(0))
-
-        # skip any items that don't match the expected schema
         facts = [f for f in facts if isinstance(f, dict) and "fact" in f]
     except Exception as e:
         print(f"Long-term fact extraction failed: {e}")
@@ -106,6 +139,16 @@ Assistant: {answer}"""
     for f in facts:
         key = f"fact_{abs(hash(f['fact'])) % 100000}"
         await store.aput(("user_facts", user_id), key, {"fact": f["fact"]})
+
+
+# ---------------------------------------------------------------------------
+# Change 2: dedup / synthesis instructions baked into the prompts
+# ---------------------------------------------------------------------------
+DEDUP_INSTRUCTIONS = """When multiple excerpts/sources say the same thing, synthesize them into a single unified
+statement instead of repeating it per source (avoid patterns like "Source A says X. Source B also says X.").
+Only attribute a point to a specific source when sources genuinely disagree, add distinct detail, or when the
+user asked where something comes from. Cite sources compactly (e.g. grouped at the end of a point) rather than
+narrating each source in turn."""
 
 
 def build_prompt(query: str, context: str, conversation_context: str = "") -> str:
@@ -119,6 +162,7 @@ Only say "I don't have enough information" if the excerpts are completely unrela
 If the excerpts contain partial information, use it to give the best answer you can.
 Always mention which book and page your answer comes from.
 Do not treat the previous conversation as a source of factual grounding — only the CONTEXT section below counts as evidence from the books.
+{DEDUP_INSTRUCTIONS}
 
 {conv_block}
 CONTEXT:
@@ -136,6 +180,7 @@ def build_web_prompt(query: str, context: str, conversation_context: str = "") -
     return f"""You are a helpful AI assistant. Answer the question using only the web search results provided below.
 Do not use your own knowledge. If the results don't contain enough information, say so.
 Do not treat the previous conversation as a source of factual grounding — only the WEB SEARCH RESULTS section counts as evidence.
+{DEDUP_INSTRUCTIONS}
 
 {conv_block}
 WEB SEARCH RESULTS:
@@ -178,6 +223,36 @@ def build_conversation_context(memory: dict) -> str:
     return "\n\n".join(parts) if parts else ""
 
 
+async def run_web_branch(query: str, conversation_context: str, user_id: str) -> list:
+    """Shared web-search path used both for gated-out queries and low-score fallback."""
+    tool_call_prompt = f"""{conversation_context}
+
+Based on the conversation above, generate a precise web search query for the user's current question.
+Resolve any pronouns or vague references (like "it", "that", "the stations") using the conversation context.
+
+CURRENT QUESTION: {query}"""
+
+    response = await AsyncClient().chat(
+        model="llama3.1:8b",
+        messages=[{"role": "user", "content": tool_call_prompt}],
+        tools=tools,
+        options={"num_ctx": 4096}
+    )
+    if response.message.tool_calls:
+        tool_call = response.message.tool_calls[0]
+        search_query = tool_call.function.arguments["query"]
+        print(f"[user:{user_id}] LLM chose tool_call search_query: {search_query!r}")
+        chunks = await mcp_web_search(search_query, topk=15)
+    else:
+        print(f"[user:{user_id}] No tool call returned, falling back to raw query: {query!r}")
+        chunks = await mcp_web_search(query, topk=15)
+
+    chunks = await rerank_chunks(query, chunks, top_k=5)
+    if chunks:
+        print(f"[Web Search] Top score: {chunks[0]['score']:.2f}")
+    return chunks
+
+
 @router.websocket("/ws/chat")
 async def websocket_chat(
     websocket: WebSocket,
@@ -196,49 +271,34 @@ async def websocket_chat(
             query = data["query"]
             topk = data.get("topk", 5)
 
-            short_term = await get_context_for_query(user_id, memory_col)
-            long_term_text = await recall_long_term_facts(user_id, store)
+            short_term, long_term_text, is_book_query = await asyncio.gather(
+                get_context_for_query(user_id, memory_col),
+                recall_long_term_facts(user_id, query, store),
+                classify_query(query),
+            )
             conversation_context = long_term_text + "\n\n" + build_conversation_context(short_term)
 
-            chunks = await retrieve(query, topk, dbcollection)
-
-            if not chunks:
-                await websocket.send_text("I don't have enough information in the books to answer that.")
-                await websocket.send_text("__DONE__:" + json.dumps({"done": True, "sources": []}))
-                continue
-
-            top_score = chunks[0]["score"]
             from_web = False
 
-            if top_score < 3.0:
-                print(f"[user:{user_id}] Low relevance ({top_score:.2f}) — invoking web_search")
+            if is_book_query:
+                chunks = await retrieve(query, topk, dbcollection)
+                top_score = chunks[0]["score"] if chunks else 0.0
 
-                tool_call_prompt = f"""{conversation_context}
-
-            Based on the conversation above, generate a precise web search query for the user's current question.
-            Resolve any pronouns or vague references (like "it", "that", "the stations") using the conversation context.
-
-            CURRENT QUESTION: {query}"""
-
-                response = await AsyncClient().chat(
-                    model="llama3.1:8b",
-                    messages=[{"role": "user", "content": tool_call_prompt}],
-                    tools=tools,
-                    options={"num_ctx": 4096}
-                )
-                if response.message.tool_calls:
-                    tool_call = response.message.tool_calls[0]
-                    search_query = tool_call.function.arguments["query"]
-                    print(f"[user:{user_id}] LLM chose tool_call search_query: {search_query!r}")
-                    chunks = await mcp_web_search(search_query, topk=15)
-                else:
-                    print(f"[user:{user_id}] No tool call returned, falling back to raw query: {query!r}")
-                    chunks = await mcp_web_search(query, topk=15)
-
-                chunks = rerank_chunks(query, chunks, top_k=5)
-                if chunks:
-                    print(f"[Web Search] Top score: {chunks[0]['score']:.2f}")
+                if not chunks or top_score < 3.0:
+                    print(f"[user:{user_id}] Low/no relevance ({top_score:.2f}) — invoking web_search")
+                    chunks = await run_web_branch(query, conversation_context, user_id)
+                    from_web = True
+            else:
+                # Change 1: gated out of the book corpus entirely — skip Milvus/rerank,
+                # go straight to web search instead of retrieving-then-discarding.
+                print(f"[user:{user_id}] Gated as non-book query — skipping retrieval, going straight to web_search")
+                chunks = await run_web_branch(query, conversation_context, user_id)
                 from_web = True
+
+            if not chunks:
+                await websocket.send_text("I don't have enough information to answer that.")
+                await websocket.send_text("__DONE__:" + json.dumps({"done": True, "sources": []}))
+                continue
 
             context = build_context(chunks)
             prompt = (

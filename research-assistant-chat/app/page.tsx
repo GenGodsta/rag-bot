@@ -38,6 +38,12 @@ export default function ChatPage() {
     )
   }
 
+  const handleNewChat = () => {
+    chat.clearMessages()
+    chat.disconnect()
+    chat.connect() // no session_id -> backend mints a fresh one
+  }
+
   return (
     <div className="flex h-screen bg-background overflow-hidden">
       {/* Sidebar */}
@@ -46,7 +52,9 @@ export default function ChatPage() {
         onToggle={() => setIsSidebarOpen(!isSidebarOpen)}
         messages={chat.messages}
         token={token}
-        onNewChat={chat.clearMessages}
+        onNewChat={handleNewChat}
+        onSelectSession={chat.loadSession}
+        activeSessionId={chat.sessionId}
         onLogout={() => {
           localStorage.removeItem('auth_token')
           chat.disconnect()

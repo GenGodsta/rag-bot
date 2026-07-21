@@ -9,6 +9,13 @@ interface HistoryRecord {
   answer: string
   sources: unknown[]
   timestamp: string
+  session_id: string
+}
+
+interface SessionSummary {
+  session_id: string
+  title: string
+  timestamp: string
 }
 
 interface ChatSidebarProps {
@@ -18,6 +25,8 @@ interface ChatSidebarProps {
   onLogout: () => void
   token: string
   onNewChat: () => void
+  onSelectSession: (sessionId: string) => void
+  activeSessionId?: string | null
 }
 
 function formatDay(timestamp: string) {
@@ -38,6 +47,8 @@ export function ChatSidebar({
   onLogout,
   token,
   onNewChat,
+  onSelectSession,
+  activeSessionId,
 }: ChatSidebarProps) {
   const [history, setHistory] = useState<HistoryRecord[]>([])
   const [isLoading, setIsLoading] = useState(true)
@@ -72,6 +83,25 @@ export function ChatSidebar({
   }
 
   const hasMessages = messages.length > 0
+
+  // Group flat history records into one entry per session_id.
+  // history is sorted newest-first from the API; walking through in
+  // order and overwriting title on repeat visits leaves the EARLIEST
+  // query in that session as the final title (used as the chat name).
+  const sessionMap = new Map<string, SessionSummary>()
+  for (const record of history) {
+    const existing = sessionMap.get(record.session_id)
+    if (!existing) {
+      sessionMap.set(record.session_id, {
+        session_id: record.session_id,
+        title: record.query,
+        timestamp: record.timestamp,
+      })
+    } else {
+      existing.title = record.query
+    }
+  }
+  const groupedSessions = Array.from(sessionMap.values())
 
   return (
     <>
@@ -115,7 +145,7 @@ export function ChatSidebar({
 
         {/* Conversations */}
         <div className="flex-1 overflow-y-auto py-4">
-          {hasMessages && (
+          {hasMessages && !activeSessionId && (
             <div className="px-3 space-y-2 mb-2">
               <p className="px-3 text-xs text-muted uppercase tracking-wide">Current session</p>
               <div className="px-3 py-2 rounded bg-surface-hover">
@@ -131,23 +161,33 @@ export function ChatSidebar({
             <p className="px-4 py-2 text-xs text-muted">Loading history...</p>
           )}
 
-          {!isLoading && history.length > 0 && (
+          {!isLoading && groupedSessions.length > 0 && (
             <div className="px-3 space-y-2">
               <p className="px-3 text-xs text-muted uppercase tracking-wide">Past questions</p>
-              {history.map((record, idx) => (
-                <div
-                  key={idx}
-                  className="px-3 py-2 rounded hover:bg-surface-hover cursor-default transition-colors"
-                  title={record.answer}
-                >
-                  <p className="text-sm text-foreground truncate">{record.query}</p>
-                  <p className="text-xs text-muted">{formatDay(record.timestamp)}</p>
-                </div>
-              ))}
+              {groupedSessions.map((session) => {
+                const isActive = session.session_id === activeSessionId
+                return (
+                  <button
+                    key={session.session_id}
+                    onClick={() => onSelectSession(session.session_id)}
+                    title={session.title}
+                    className={`w-full text-left px-3 py-2 rounded transition-colors ${
+                      isActive ? 'bg-surface-hover' : 'hover:bg-surface-hover'
+                    }`}
+                  >
+                    <p className="text-sm text-foreground truncate">
+                      {session.title.length > 30
+                        ? session.title.substring(0, 30) + '...'
+                        : session.title}
+                    </p>
+                    <p className="text-xs text-muted">{formatDay(session.timestamp)}</p>
+                  </button>
+                )
+              })}
             </div>
           )}
 
-          {!isLoading && history.length === 0 && !hasMessages && (
+          {!isLoading && groupedSessions.length === 0 && !hasMessages && (
             <div className="px-4 py-8 text-center">
               <p className="text-sm text-muted">No conversations yet</p>
             </div>

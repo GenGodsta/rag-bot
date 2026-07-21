@@ -23,6 +23,7 @@ async def get_memory_collection() -> AsyncIOMotorCollection:
 
 async def save_chat(
     user_id: str,
+    session_id: str,
     query: str,
     answer: str,
     sources: list,
@@ -30,6 +31,7 @@ async def save_chat(
 ):
     await history_col.insert_one({
         "user_id": user_id,
+        "session_id": session_id,
         "query": query,
         "answer": answer,
         "sources": sources,
@@ -136,3 +138,19 @@ async def clear_history(
     result = await history_col.delete_many({"user_id": user_id})
     await memory_col.delete_one({"user_id": user_id})
     return {"deleted": result.deleted_count}
+
+@router.get("/{session_id}")
+async def get_session_history(
+    session_id: str,
+    user_id: str = Depends(get_current_user),
+    history_col=Depends(get_history_collection)
+):
+    cursor = history_col.find(
+        {"user_id": user_id, "session_id": session_id},
+        {"_id": 0}
+    ).sort("timestamp", 1)  
+
+    records = await cursor.to_list(length=None)
+    if not records:
+        return {"session_id": session_id, "turns": []}
+    return {"session_id": session_id, "turns": records}

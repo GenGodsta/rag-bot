@@ -9,6 +9,7 @@ from mongo_store import MongoStore
 import json
 import asyncio
 import re
+import uuid
 
 router = APIRouter()
 
@@ -40,18 +41,7 @@ tools = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Change 1: gating / classification
-# ---------------------------------------------------------------------------
 async def classify_query(query: str) -> bool:
-    """
-    Cheap, fast pre-check: is this question plausibly answerable from the
-    ML/AI textbook corpus, or is it clearly something else (current events,
-    people, general trivia, unrelated domains)?
-
-    Returns True  -> try the book corpus (Milvus retrieval)
-            False -> skip retrieval entirely, go straight to web search
-    """
     prompt = f"""Classify this question as BOOK or WEB.
 
 BOOK = the question is about AI/ML concepts, algorithms, theory, models, statistics,
@@ -106,13 +96,32 @@ async def recall_long_term_facts(user_id: str, query: str, store: MongoStore) ->
 
 
 async def update_long_term_facts(user_id: str, query: str, answer: str, store: MongoStore):
-    prompt = f"""Extract durable facts about the USER (background, preferences, goals) from this exchange.
-Skip anything only relevant to this single question.
+    prompt = f"""Extract durable facts about the USER themselves — their identity, preferences, background, goals, or circumstances that would still be true and relevant in a future, unrelated conversation.
 
-Respond with ONLY a JSON array. Every item must be exactly {{"fact": "<text>"}}. No other keys. No markdown, no explanation, no text before or after the array.
+DO extract:
+- Stable attributes: "user is vegetarian", "user is training for a marathon", "user works as a nurse"
+- Explicit preferences: "user prefers concise answers", "user is learning Spanish"
+- Ongoing goals/context: "user is planning a trip to Japan in December"
 
-Example output: [{{"fact": "user is vegetarian"}}, {{"fact": "user weighs 80kg"}}]
+DO NOT extract:
+- The subject or topic of the current question (e.g. do NOT write "user is interested in Cristiano Ronaldo" or "user asked about Messi's clubs" just because they asked about it once)
+- Trivia, facts, or opinions about third parties (celebrities, historical figures, companies) — those belong to the answer, not the user
+- One-off curiosity that doesn't reveal anything durable about the user
 
+Examples:
+Q: "What shoes does Ronaldo wear?"
+A: "Nike Mercurial Superfly, part of his CR7 line."
+-> [] (this is trivia about Ronaldo, not a fact about the user)
+
+Q: "I'm vegetarian, what protein sources do you recommend?"
+A: "Lentils, tofu, chickpeas..."
+-> [{{"fact": "user is vegetarian"}}]
+
+Q: "What clubs did Messi play for?"
+A: "Barcelona, PSG, Inter Miami."
+-> [] (trivia about Messi, not the user)
+
+Now extract from this exchange. Respond with ONLY a JSON array. Every item must be exactly {{"fact": "<text>"}}. No other keys, no markdown, no explanation, no text before or after the array.
 If there are no durable facts, respond with exactly: []
 
 User: {query}
@@ -137,13 +146,10 @@ Assistant: {answer}"""
         facts = []
 
     for f in facts:
-        key = f"fact_{abs(hash(f['fact'])) % 100000}"
+        key = f"fact_{abs(hash(f['fact'].strip().lower())) % 100000}"
         await store.aput(("user_facts", user_id), key, {"fact": f["fact"]})
 
 
-# ---------------------------------------------------------------------------
-# Change 2: dedup / synthesis instructions baked into the prompts
-# ---------------------------------------------------------------------------
 DEDUP_INSTRUCTIONS = """When multiple excerpts/sources say the same thing, synthesize them into a single unified
 statement instead of repeating it per source (avoid patterns like "Source A says X. Source B also says X.").
 Only attribute a point to a specific source when sources genuinely disagree, add distinct detail, or when the
@@ -257,13 +263,14 @@ CURRENT QUESTION: {query}"""
 async def websocket_chat(
     websocket: WebSocket,
     token: str,
+    session_id: str | None = None,   
     dbcollection=Depends(connect_db),
     history_col=Depends(get_history_collection),
     memory_col=Depends(get_memory_collection)
 ):
     user_id = decode_token(token)
     store = get_store()
-
+    session_id = session_id or str(uuid.uuid4())
     await websocket.accept()
     try:
         while True:
@@ -289,8 +296,6 @@ async def websocket_chat(
                     chunks = await run_web_branch(query, conversation_context, user_id)
                     from_web = True
             else:
-                # Change 1: gated out of the book corpus entirely — skip Milvus/rerank,
-                # go straight to web search instead of retrieving-then-discarding.
                 print(f"[user:{user_id}] Gated as non-book query — skipping retrieval, going straight to web_search")
                 chunks = await run_web_branch(query, conversation_context, user_id)
                 from_web = True
@@ -322,7 +327,7 @@ async def websocket_chat(
 
             await websocket.send_text("__DONE__:" + json.dumps({"done": True, "sources": sources}))
 
-            await save_chat(user_id, query, full_answer, sources, history_col)
+            await save_chat(user_id, session_id, query, full_answer, sources, history_col)
 
             asyncio.create_task(update_memory(user_id, query, full_answer, memory_col))
             asyncio.create_task(update_long_term_facts(user_id, query, full_answer, store))
